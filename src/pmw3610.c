@@ -676,8 +676,13 @@ static int pmw3610_init(const struct device *dev) {
     data->init_retry_count = 0;
     data->init_retry_attempts = config->init_retry_count;
 
-    /* default active_perf from force_high_performance; overridden below if rate-cycle GPIO used */
+    /* Boot at USB (high-performance) rate when OUTPUT_RATE_NOTIFY is enabled;
+     * central will send TRANSPORT_CHANGED if BLE is actually active. */
+#if defined(CONFIG_PMW3610_OUTPUT_RATE_NOTIFY)
+    data->active_perf = pmw3610_ms_to_perf(config->usb_rate_ms);
+#else
     data->active_perf = config->force_high_performance ? 0x0E : 0x00;
+#endif
 
     // init trigger handler work
     k_work_init(&data->trigger_work, pmw3610_work_callback);
@@ -800,6 +805,14 @@ PM_DEVICE_DT_INST_DEFINE(n, pmw3610_pm_action);
 #define PMW3610_SPI_MODE (SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_MODE_CPOL | \
                         SPI_MODE_CPHA | SPI_TRANSFER_MSB)
 
+#if defined(CONFIG_PMW3610_OUTPUT_RATE_NOTIFY)
+#define PMW3610_OUTPUT_RATE_CFG(n) \
+        .usb_rate_ms = DT_INST_PROP_OR(n, usb_rate_ms, 2), \
+        .ble_rate_ms = DT_INST_PROP_OR(n, ble_rate_ms, 8),
+#else
+#define PMW3610_OUTPUT_RATE_CFG(n)
+#endif
+
 #if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
 #define PMW3610_RATE_CYCLE_RATES(n) \
     static const int32_t rate_cycle_rates_##n[] = DT_INST_PROP(n, rate_cycle_rates_ms);
@@ -832,6 +845,7 @@ PM_DEVICE_DT_INST_DEFINE(n, pmw3610_pm_action);
         .enable_pm_support = DT_PROP(DT_DRV_INST(n), enable_pm_support),                           \
         .init_retry_count = DT_PROP(DT_DRV_INST(n), init_retry_count),                             \
         .init_retry_interval = DT_PROP(DT_DRV_INST(n), init_retry_interval),                       \
+        PMW3610_OUTPUT_RATE_CFG(n)                                                                  \
         PMW3610_RATE_CYCLE_CFG(n)                                                                  \
     };                                                                                             \
     DEVICE_DT_INST_DEFINE(n, pmw3610_init, NULL, &data##n, &config##n, POST_KERNEL,                \
@@ -932,3 +946,33 @@ static void pmw3610_log_squal_work(struct k_work *work) {
 
 ZMK_LISTENER(zmk_pmw3610_idle_sleeper, on_activity_state);
 ZMK_SUBSCRIPTION(zmk_pmw3610_idle_sleeper, zmk_activity_state_changed);
+
+#if defined(CONFIG_PMW3610_OUTPUT_RATE_NOTIFY)
+#include <zmk/events/peripheral_transport_changed.h>
+#include <zmk/endpoints_types.h>
+
+static int pmw3610_on_transport_changed(const zmk_event_t *eh) {
+    const struct zmk_peripheral_transport_changed *ev = as_zmk_peripheral_transport_changed(eh);
+    if (!ev) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(pmw3610_devs); i++) {
+        const struct pixart_config *config = pmw3610_devs[i]->config;
+        struct pixart_data *data = pmw3610_devs[i]->data;
+        int32_t rate_ms = (ev->transport == ZMK_TRANSPORT_USB) ? config->usb_rate_ms
+                                                                : config->ble_rate_ms;
+        if (rate_ms > 0) {
+            data->active_perf = pmw3610_ms_to_perf(rate_ms);
+            LOG_INF("PMW3610 transport=%d → %dms PERF=0x%02x",
+                    ev->transport, rate_ms, data->active_perf);
+            if (data->ready) {
+                pmw3610_set_performance(pmw3610_devs[i], true);
+            }
+        }
+    }
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(zmk_pmw3610_transport, pmw3610_on_transport_changed);
+ZMK_SUBSCRIPTION(zmk_pmw3610_transport, zmk_peripheral_transport_changed);
+#endif /* CONFIG_PMW3610_OUTPUT_RATE_NOTIFY */

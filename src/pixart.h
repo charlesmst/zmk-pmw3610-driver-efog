@@ -66,6 +66,11 @@ struct pixart_config {
     uint8_t init_retry_count;
     uint16_t init_retry_interval;
 
+#if defined(CONFIG_PMW3610_OUTPUT_RATE_NOTIFY)
+    int32_t usb_rate_ms; /* PERFORMANCE register rate when USB is active */
+    int32_t ble_rate_ms; /* PERFORMANCE register rate when BLE is active */
+#endif
+
 #if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
     struct gpio_dt_spec rate_cycle_gpio;
     const int32_t *rate_cycle_rates_ms;

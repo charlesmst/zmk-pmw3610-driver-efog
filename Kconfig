@@ -63,6 +63,15 @@ config PMW3610_REPORT_INTERVAL_MIN
 		Slow down input reporting for hid queue over the air.
 		Turn value down to 8ms to get sharp response if use with USB only.
 
+config PMW3610_OUTPUT_RATE_NOTIFY
+    bool "PMW3610 adjust hardware rate on USB/BLE transport change"
+    default n
+    help
+      When the ESB central switches between USB and BLE output it broadcasts
+      a TRANSPORT_CHANGED command. Enable this to have the PMW3610 driver
+      subscribe and set the hardware PERFORMANCE register to usb-rate-ms or
+      ble-rate-ms from the sensor DTS node. Boot default is the USB rate.
+
 config PMW3610_RATE_CYCLE_GPIO
     bool "PMW3610 hardware rate-cycle GPIO button"
     default n
