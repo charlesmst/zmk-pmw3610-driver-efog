@@ -59,17 +59,21 @@ config PMW3610_REPORT_INTERVAL_MIN
 	int "PMW3610's default minimum report rate"
 	default 0
 	help
-	  Default minimum report interval in milliseconds (startup default).
-	  Can be changed at runtime via PMW3610_ATTR_REPORT_INTERVAL_MS or the
-	  rate-cycle GPIO button. 0 = no rate limit; 8 = 120 Hz; 4 = 250 Hz; 2 = 500 Hz.
+	  Default minimum report interval in milliseconds.
+		Slow down input reporting for hid queue over the air.
+		Turn value down to 8ms to get sharp response if use with USB only.
 
 config PMW3610_RATE_CYCLE_GPIO
     bool "PMW3610 hardware rate-cycle GPIO button"
     default n
     help
-      Enable a dedicated GPIO button that directly cycles the PMW3610 report
-      interval on the peripheral side (no central/keymap involvement).
+      Enable a dedicated GPIO button that cycles the PMW3610 hardware run rate
+      by writing the PERFORMANCE register on each press (50 ms debounce).
+      Entirely peripheral-local — no central or keymap involvement.
       Configure rate-cycle-gpios and rate-cycle-rates-ms in the sensor DTS node.
+      The first entry in rate-cycle-rates-ms is the boot rate (overrides
+      force-high-performance). Supported values: 2 ms (~500 Hz), 4 ms (250 Hz),
+      8 ms (125 Hz).
 
 config PMW3610_SMART_ALGORITHM
   bool "Enable an algorithm of PMW3610 to enhance surface coverage"

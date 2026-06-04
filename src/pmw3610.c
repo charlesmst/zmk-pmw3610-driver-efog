@@ -237,6 +237,20 @@ static int pmw3610_set_downshift_time(const struct device *dev, const uint8_t re
     return err;
 }
 
+/* PERFORMANCE register bits:
+ *   BIT 3:   VEL_RUNRATE    0x0: 8ms; 0x1: 4ms
+ *   BIT 2:   POSHI_RUN_RATE 0x0: 8ms; 0x1: 4ms
+ *   BIT 1-0: POSLO_RUN_RATE 0x0: 8ms; 0x1: 4ms; 0x2: 2ms
+ */
+static uint8_t pmw3610_ms_to_perf(int32_t rate_ms) {
+    switch (rate_ms) {
+    case 2:  return 0x0E; /* all 4ms except POSLO=2ms → ~500 Hz */
+    case 4:  return 0x0D; /* all 4ms → 250 Hz */
+    case 8:  /* fall through */
+    default: return 0x00; /* all 8ms → 125 Hz */
+    }
+}
+
 static int pmw3610_set_performance(const struct device *dev, const bool enabled) {
     const struct pixart_config *config = dev->config;
     int err = 0;
@@ -250,19 +264,10 @@ static int pmw3610_set_performance(const struct device *dev, const bool enabled)
         }
         LOG_DBG("Get performance register (reg value 0x%x)", value);
 
-        // Set prefered RUN RATE        
-        //   BIT 3:   VEL_RUNRATE    0x0: 8ms; 0x1 4ms;
-        //   BIT 2:   POSHI_RUN_RATE 0x0: 8ms; 0x1 4ms;
-        //   BIT 1-0: POSLO_RUN_RATE 0x0: 8ms; 0x1 4ms; 0x2 2ms; 0x4 Reserved
-        uint8_t perf;
-        if (config->force_high_performance && enabled) {
-            perf = 0x0e; // RUN RATE @ 4/2ms
-        } else {
-            perf = 0x00; // RUN RATE @ 8ms
-        }
+        struct pixart_data *data = dev->data;
+        uint8_t perf = enabled ? data->active_perf : 0x00;
 
         if (perf != value) {
-            struct pixart_data *data = dev->data;
             data->data_index = 0;
             data->data_ready = false;
 
@@ -519,15 +524,6 @@ static int pmw3610_report_data(const struct device *dev) {
     dx += x;
     dy += y;
 
-    // software rate limiter
-    if (data->report_interval_ms > 0) {
-        int64_t rpt_now = k_uptime_get();
-        if (rpt_now - data->last_rpt_time < data->report_interval_ms) {
-            return 0;
-        }
-        data->last_rpt_time = rpt_now;
-    }
-
     // fetch report value
     const int16_t rx = (int16_t)CLAMP(dx, INT16_MIN, INT16_MAX);
     const int16_t ry = (int16_t)CLAMP(dy, INT16_MIN, INT16_MAX);
@@ -571,8 +567,13 @@ static void pmw3610_rate_cycle_work_cb(struct k_work *work) {
     const struct pixart_config *config = dev->config;
 
     data->rate_cycle_idx = (data->rate_cycle_idx + 1) % config->rate_cycle_rates_count;
-    data->report_interval_ms = config->rate_cycle_rates_ms[data->rate_cycle_idx];
-    LOG_INF("report rate cycled to %d ms", data->report_interval_ms);
+    int32_t rate_ms = config->rate_cycle_rates_ms[data->rate_cycle_idx];
+    data->active_perf = pmw3610_ms_to_perf(rate_ms);
+    LOG_INF("PMW3610 run rate → %d ms (PERF=0x%02x)", rate_ms, data->active_perf);
+
+    if (data->ready) {
+        pmw3610_set_performance(dev, true);
+    }
 
     gpio_pin_interrupt_configure_dt(&config->rate_cycle_gpio, GPIO_INT_EDGE_TO_ACTIVE);
 }
@@ -618,7 +619,11 @@ static int pmw3610_init_rate_cycle_gpio(const struct device *dev) {
         LOG_ERR("Cannot configure rate-cycle GPIO interrupt: %d", err);
     }
 
-    LOG_INF("PMW3610 rate-cycle GPIO initialized (boot rate %d ms)", data->report_interval_ms);
+    /* boot rate = first entry; overrides force_high_performance */
+    data->rate_cycle_idx = 0;
+    data->active_perf = pmw3610_ms_to_perf(config->rate_cycle_rates_ms[0]);
+    LOG_INF("PMW3610 rate-cycle GPIO init: boot rate %d ms (PERF=0x%02x)",
+            config->rate_cycle_rates_ms[0], data->active_perf);
     return err;
 }
 #endif /* CONFIG_PMW3610_RATE_CYCLE_GPIO */
@@ -671,8 +676,8 @@ static int pmw3610_init(const struct device *dev) {
     data->init_retry_count = 0;
     data->init_retry_attempts = config->init_retry_count;
 
-    data->report_interval_ms = CONFIG_PMW3610_REPORT_INTERVAL_MIN;
-    data->last_rpt_time = 0;
+    /* default active_perf from force_high_performance; overridden below if rate-cycle GPIO used */
+    data->active_perf = config->force_high_performance ? 0x0E : 0x00;
 
     // init trigger handler work
     k_work_init(&data->trigger_work, pmw3610_work_callback);
@@ -757,14 +762,6 @@ static int pmw3610_attr_set(const struct device *dev, const enum sensor_channel 
     case PMW3610_ATTR_REST3_SAMPLE_TIME:
         err = pmw3610_set_sample_time(dev, PMW3610_REG_REST3_RATE, PMW3610_SVALUE_TO_TIME(*val));
         break;
-
-    case PMW3610_ATTR_REPORT_INTERVAL_MS: {
-        struct pixart_data *d = dev->data;
-        d->report_interval_ms = val->val1;
-        LOG_INF("report_interval_ms set to %d", d->report_interval_ms);
-        err = 0;
-        break;
-    }
 
     default:
         LOG_ERR("Unknown attribute");

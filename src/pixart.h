@@ -38,8 +38,7 @@ struct pixart_data {
     uint64_t                     last_data;
 #endif
 
-    int32_t report_interval_ms;
-    int64_t last_rpt_time;
+    uint8_t active_perf; /* current target PERFORMANCE register value when active */
 
 #if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
     struct gpio_callback rate_cycle_gpio_cb;
