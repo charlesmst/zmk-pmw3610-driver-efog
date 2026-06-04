@@ -1,5 +1,0 @@
-west:
-  command: /home/charlesstein/.local/bin/west build -d build/charybdis_esb_right --board
-    nice_nano@2.0.0 -- -DSHIELD=charybdis_esb_right
-  topdir: /home/charlesstein/personal/zmk-config-roBa-charybdis-esb
-  version: 1.3.0
