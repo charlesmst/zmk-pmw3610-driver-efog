@@ -37,6 +37,15 @@ struct pixart_data {
 #if IS_ENABLED(CONFIG_PMW3610_IGNORE_AFTER_REST) || IS_ENABLED(CONFIG_PMW3610_ANTI_WARP)
     uint64_t                     last_data;
 #endif
+
+    int32_t report_interval_ms;
+    int64_t last_rpt_time;
+
+#if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
+    struct gpio_callback rate_cycle_gpio_cb;
+    struct k_work_delayable rate_cycle_work;
+    uint8_t rate_cycle_idx;
+#endif
 };
 
 // device config data structure
@@ -57,6 +66,12 @@ struct pixart_config {
     bool enable_pm_support;
     uint8_t init_retry_count;
     uint16_t init_retry_interval;
+
+#if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
+    struct gpio_dt_spec rate_cycle_gpio;
+    const int32_t *rate_cycle_rates_ms;
+    size_t rate_cycle_rates_count;
+#endif
 };
 
 #ifdef __cplusplus

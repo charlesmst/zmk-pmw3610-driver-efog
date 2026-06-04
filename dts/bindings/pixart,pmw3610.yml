@@ -44,3 +44,9 @@ properties:
     type: int
     default: 100
     description: "Interval between initialization retries in milliseconds"
+  rate-cycle-gpios:
+    type: phandle-array
+    description: Optional GPIO for a hardware rate-cycle button (cycles report interval locally)
+  rate-cycle-rates-ms:
+    type: array
+    description: Ordered list of report-interval values (ms) to cycle through (e.g. 8 4 2)

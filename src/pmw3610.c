@@ -519,6 +519,15 @@ static int pmw3610_report_data(const struct device *dev) {
     dx += x;
     dy += y;
 
+    // software rate limiter
+    if (data->report_interval_ms > 0) {
+        int64_t rpt_now = k_uptime_get();
+        if (rpt_now - data->last_rpt_time < data->report_interval_ms) {
+            return 0;
+        }
+        data->last_rpt_time = rpt_now;
+    }
+
     // fetch report value
     const int16_t rx = (int16_t)CLAMP(dx, INT16_MIN, INT16_MAX);
     const int16_t ry = (int16_t)CLAMP(dy, INT16_MIN, INT16_MAX);
@@ -553,6 +562,66 @@ static void pmw3610_work_callback(struct k_work *work) {
     pmw3610_report_data(dev);
     pmw3610_set_interrupt(dev, true);
 }
+
+#if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
+static void pmw3610_rate_cycle_work_cb(struct k_work *work) {
+    struct k_work_delayable *dwork = CONTAINER_OF(work, struct k_work_delayable, work);
+    struct pixart_data *data = CONTAINER_OF(dwork, struct pixart_data, rate_cycle_work);
+    const struct device *dev = data->dev;
+    const struct pixart_config *config = dev->config;
+
+    data->rate_cycle_idx = (data->rate_cycle_idx + 1) % config->rate_cycle_rates_count;
+    data->report_interval_ms = config->rate_cycle_rates_ms[data->rate_cycle_idx];
+    LOG_INF("report rate cycled to %d ms", data->report_interval_ms);
+
+    gpio_pin_interrupt_configure_dt(&config->rate_cycle_gpio, GPIO_INT_EDGE_TO_ACTIVE);
+}
+
+static void pmw3610_rate_cycle_gpio_cb(const struct device *port, struct gpio_callback *cb,
+                                       uint32_t pins) {
+    struct pixart_data *data = CONTAINER_OF(cb, struct pixart_data, rate_cycle_gpio_cb);
+    const struct device *dev = data->dev;
+    const struct pixart_config *config = dev->config;
+
+    gpio_pin_interrupt_configure_dt(&config->rate_cycle_gpio, GPIO_INT_DISABLE);
+    k_work_schedule(&data->rate_cycle_work, K_MSEC(50));
+}
+
+static int pmw3610_init_rate_cycle_gpio(const struct device *dev) {
+    struct pixart_data *data = dev->data;
+    const struct pixart_config *config = dev->config;
+
+    if (!device_is_ready(config->rate_cycle_gpio.port)) {
+        LOG_ERR("Rate-cycle GPIO device not ready");
+        return -ENODEV;
+    }
+
+    int err = gpio_pin_configure_dt(&config->rate_cycle_gpio, GPIO_INPUT);
+    if (err) {
+        LOG_ERR("Cannot configure rate-cycle GPIO: %d", err);
+        return err;
+    }
+
+    gpio_init_callback(&data->rate_cycle_gpio_cb, pmw3610_rate_cycle_gpio_cb,
+                       BIT(config->rate_cycle_gpio.pin));
+
+    err = gpio_add_callback(config->rate_cycle_gpio.port, &data->rate_cycle_gpio_cb);
+    if (err) {
+        LOG_ERR("Cannot add rate-cycle GPIO callback: %d", err);
+        return err;
+    }
+
+    k_work_init_delayable(&data->rate_cycle_work, pmw3610_rate_cycle_work_cb);
+
+    err = gpio_pin_interrupt_configure_dt(&config->rate_cycle_gpio, GPIO_INT_EDGE_TO_ACTIVE);
+    if (err) {
+        LOG_ERR("Cannot configure rate-cycle GPIO interrupt: %d", err);
+    }
+
+    LOG_INF("PMW3610 rate-cycle GPIO initialized (boot rate %d ms)", data->report_interval_ms);
+    return err;
+}
+#endif /* CONFIG_PMW3610_RATE_CYCLE_GPIO */
 
 static int pmw3610_init_irq(const struct device *dev) {
     int err;
@@ -602,6 +671,9 @@ static int pmw3610_init(const struct device *dev) {
     data->init_retry_count = 0;
     data->init_retry_attempts = config->init_retry_count;
 
+    data->report_interval_ms = CONFIG_PMW3610_REPORT_INTERVAL_MIN;
+    data->last_rpt_time = 0;
+
     // init trigger handler work
     k_work_init(&data->trigger_work, pmw3610_work_callback);
 
@@ -610,6 +682,13 @@ static int pmw3610_init(const struct device *dev) {
     if (err) {
         return err;
     }
+
+#if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
+    err = pmw3610_init_rate_cycle_gpio(dev);
+    if (err) {
+        return err;
+    }
+#endif
 
     if (config->enable_pm_support && !config->rst_gpio.port) {
         LOG_ERR("PM support requested but RST GPIO not defined.");
@@ -679,6 +758,14 @@ static int pmw3610_attr_set(const struct device *dev, const enum sensor_channel 
         err = pmw3610_set_sample_time(dev, PMW3610_REG_REST3_RATE, PMW3610_SVALUE_TO_TIME(*val));
         break;
 
+    case PMW3610_ATTR_REPORT_INTERVAL_MS: {
+        struct pixart_data *d = dev->data;
+        d->report_interval_ms = val->val1;
+        LOG_INF("report_interval_ms set to %d", d->report_interval_ms);
+        err = 0;
+        break;
+    }
+
     default:
         LOG_ERR("Unknown attribute");
         err = -ENOTSUP;
@@ -716,7 +803,20 @@ PM_DEVICE_DT_INST_DEFINE(n, pmw3610_pm_action);
 #define PMW3610_SPI_MODE (SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_MODE_CPOL | \
                         SPI_MODE_CPHA | SPI_TRANSFER_MSB)
 
+#if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
+#define PMW3610_RATE_CYCLE_RATES(n) \
+    static const int32_t rate_cycle_rates_##n[] = DT_INST_PROP(n, rate_cycle_rates_ms);
+#define PMW3610_RATE_CYCLE_CFG(n) \
+        .rate_cycle_gpio = GPIO_DT_SPEC_INST_GET(n, rate_cycle_gpios), \
+        .rate_cycle_rates_ms = rate_cycle_rates_##n, \
+        .rate_cycle_rates_count = ARRAY_SIZE(rate_cycle_rates_##n),
+#else
+#define PMW3610_RATE_CYCLE_RATES(n)
+#define PMW3610_RATE_CYCLE_CFG(n)
+#endif
+
 #define PMW3610_DEFINE(n)                                                                          \
+    PMW3610_RATE_CYCLE_RATES(n)                                                                    \
     static struct pixart_data data##n;                                                             \
     static const struct pixart_config config##n = {                                                \
         .id = n,                                                                                   \
@@ -735,6 +835,7 @@ PM_DEVICE_DT_INST_DEFINE(n, pmw3610_pm_action);
         .enable_pm_support = DT_PROP(DT_DRV_INST(n), enable_pm_support),                           \
         .init_retry_count = DT_PROP(DT_DRV_INST(n), init_retry_count),                             \
         .init_retry_interval = DT_PROP(DT_DRV_INST(n), init_retry_interval),                       \
+        PMW3610_RATE_CYCLE_CFG(n)                                                                  \
     };                                                                                             \
     DEVICE_DT_INST_DEFINE(n, pmw3610_init, NULL, &data##n, &config##n, POST_KERNEL,                \
                           CONFIG_INPUT_PMW3610_INIT_PRIORITY, &pmw3610_driver_api);

@@ -120,6 +120,9 @@ enum pmw3610_attribute {
 	/** Sampling frequency time during REST3 mode [ms]. */
 	PMW3610_ATTR_REST3_SAMPLE_TIME,
 
+	/** Runtime report interval in milliseconds (0 = no rate limit). */
+	PMW3610_ATTR_REPORT_INTERVAL_MS,
+
 };
 
 #ifdef __cplusplus
