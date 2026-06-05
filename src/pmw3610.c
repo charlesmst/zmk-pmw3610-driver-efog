@@ -676,8 +676,7 @@ static int pmw3610_init(const struct device *dev) {
     data->init_retry_count = 0;
     data->init_retry_attempts = config->init_retry_count;
 
-    /* Boot at USB (high-performance) rate when OUTPUT_RATE_NOTIFY is enabled;
-     * central will send TRANSPORT_CHANGED if BLE is actually active. */
+    /* Boot at the configured high-performance rate. */
 #if defined(CONFIG_PMW3610_OUTPUT_RATE_NOTIFY)
     data->active_perf = pmw3610_ms_to_perf(config->usb_rate_ms);
 #else
@@ -946,33 +945,3 @@ static void pmw3610_log_squal_work(struct k_work *work) {
 
 ZMK_LISTENER(zmk_pmw3610_idle_sleeper, on_activity_state);
 ZMK_SUBSCRIPTION(zmk_pmw3610_idle_sleeper, zmk_activity_state_changed);
-
-#if defined(CONFIG_PMW3610_OUTPUT_RATE_NOTIFY)
-#include <zmk/events/peripheral_transport_changed.h>
-#include <zmk/endpoints_types.h>
-
-static int pmw3610_on_transport_changed(const zmk_event_t *eh) {
-    const struct zmk_peripheral_transport_changed *ev = as_zmk_peripheral_transport_changed(eh);
-    if (!ev) {
-        return ZMK_EV_EVENT_BUBBLE;
-    }
-    for (size_t i = 0; i < ARRAY_SIZE(pmw3610_devs); i++) {
-        const struct pixart_config *config = pmw3610_devs[i]->config;
-        struct pixart_data *data = pmw3610_devs[i]->data;
-        int32_t rate_ms = (ev->transport == ZMK_TRANSPORT_USB) ? config->usb_rate_ms
-                                                                : config->ble_rate_ms;
-        if (rate_ms > 0) {
-            data->active_perf = pmw3610_ms_to_perf(rate_ms);
-            LOG_INF("PMW3610 transport=%d → %dms PERF=0x%02x",
-                    ev->transport, rate_ms, data->active_perf);
-            if (data->ready) {
-                pmw3610_set_performance(pmw3610_devs[i], true);
-            }
-        }
-    }
-    return ZMK_EV_EVENT_BUBBLE;
-}
-
-ZMK_LISTENER(zmk_pmw3610_transport, pmw3610_on_transport_changed);
-ZMK_SUBSCRIPTION(zmk_pmw3610_transport, zmk_peripheral_transport_changed);
-#endif /* CONFIG_PMW3610_OUTPUT_RATE_NOTIFY */
