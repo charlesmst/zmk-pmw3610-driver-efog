@@ -12,6 +12,11 @@
 #include <zephyr/pm/device.h>
 #include <zmk/keymap.h>
 #include <zmk/events/activity_state_changed.h>
+#if IS_ENABLED(CONFIG_PMW3610_ENDPOINT_RATE_NOTIFY)
+#include <zmk/endpoints.h>
+#include <zmk/endpoints_types.h>
+#include <zmk/events/endpoint_changed.h>
+#endif
 #include "pmw3610.h"
 
 #include <zephyr/logging/log.h>
@@ -678,7 +683,13 @@ static int pmw3610_init(const struct device *dev) {
 
     /* Boot at the configured high-performance rate. */
 #if defined(CONFIG_PMW3610_OUTPUT_RATE_NOTIFY)
+#if IS_ENABLED(CONFIG_PMW3610_ENDPOINT_RATE_NOTIFY)
+    data->active_perf = pmw3610_ms_to_perf(
+        zmk_endpoints_selected().transport == ZMK_TRANSPORT_USB ? config->usb_rate_ms
+                                                                : config->ble_rate_ms);
+#else
     data->active_perf = pmw3610_ms_to_perf(config->usb_rate_ms);
+#endif
 #else
     data->active_perf = config->force_high_performance ? 0x0E : 0x00;
 #endif
@@ -859,6 +870,38 @@ static const struct device *pmw3610_devs[] = {
     DT_FOREACH_STATUS_OKAY(pixart_pmw3610, GET_PMW3610_DEV)
 };
 
+static enum zmk_activity_state prev_state = ZMK_ACTIVITY_ACTIVE;
+
+#if IS_ENABLED(CONFIG_PMW3610_ENDPOINT_RATE_NOTIFY)
+static int pmw3610_on_endpoint_changed(const zmk_event_t *eh) {
+    const struct zmk_endpoint_changed *ev = as_zmk_endpoint_changed(eh);
+
+    if (ev == NULL) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    for (size_t i = 0; i < ARRAY_SIZE(pmw3610_devs); i++) {
+        const struct pixart_config *config = pmw3610_devs[i]->config;
+        struct pixart_data *data = pmw3610_devs[i]->data;
+        const int32_t rate_ms = ev->endpoint.transport == ZMK_TRANSPORT_USB ? config->usb_rate_ms
+                                                                            : config->ble_rate_ms;
+
+        data->active_perf = pmw3610_ms_to_perf(rate_ms);
+        LOG_INF("PMW3610 endpoint transport=%d rate=%dms PERF=0x%02x", ev->endpoint.transport,
+                rate_ms, data->active_perf);
+
+        if (data->ready) {
+            pmw3610_set_performance(pmw3610_devs[i], prev_state == ZMK_ACTIVITY_ACTIVE);
+        }
+    }
+
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(zmk_pmw3610_endpoint_rate, pmw3610_on_endpoint_changed);
+ZMK_SUBSCRIPTION(zmk_pmw3610_endpoint_rate, zmk_endpoint_changed);
+#endif
+
 static int pmw3610_shutdown(const struct device *dev) {
     const struct pixart_config *config = dev->config;
     if (!config->enable_pm_support) {
@@ -868,7 +911,6 @@ static int pmw3610_shutdown(const struct device *dev) {
     return pmw3610_write_reg(dev, PMW3610_REG_SHUTDOWN, PMW3610_REG_SHUTDOWN_CMD);
 }
 
-static uint8_t prev_state = 0;
 static int on_activity_state(const zmk_event_t *eh) {
     struct zmk_activity_state_changed *state_ev = as_zmk_activity_state_changed(eh);
 

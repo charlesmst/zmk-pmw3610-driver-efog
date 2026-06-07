@@ -72,6 +72,17 @@ config PMW3610_OUTPUT_RATE_NOTIFY
       subscribe and set the hardware PERFORMANCE register to usb-rate-ms or
       ble-rate-ms from the sensor DTS node. Boot default is the USB rate.
 
+config PMW3610_ENDPOINT_RATE_NOTIFY
+    bool "PMW3610 adjust hardware rate on ZMK endpoint changes"
+    default n
+    depends on ZMK_USB && ZMK_BLE
+    select PMW3610_OUTPUT_RATE_NOTIFY
+    help
+      Subscribe to zmk_endpoint_changed and set the hardware PERFORMANCE
+      register to usb-rate-ms or ble-rate-ms from the sensor DTS node. This is
+      intended for central-side sensors where the selected ZMK endpoint is
+      available locally.
+
 config PMW3610_RATE_CYCLE_GPIO
     bool "PMW3610 hardware rate-cycle GPIO button"
     default n
