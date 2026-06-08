@@ -128,6 +128,31 @@ module = PMW3610
 module-str = PMW3610
 source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"
 
+
+config PMW3610_OUTPUT_RATE_NOTIFY
+    bool "PMW3610 adjust hardware rate on USB/BLE transport change"
+    default n
+    help
+      Enable to have the PMW3610 driver set the hardware PERFORMANCE register
+      to usb-rate-ms or ble-rate-ms from the sensor DTS node.
+      Boot default is the USB rate.
+
+config PMW3610_ENDPOINT_RATE_NOTIFY
+    bool "PMW3610 adjust hardware rate on ZMK endpoint changes"
+    default n
+    depends on ZMK_USB && ZMK_BLE
+    select PMW3610_OUTPUT_RATE_NOTIFY
+    help
+      Subscribe to zmk_endpoint_changed and set the PERFORMANCE register to
+      usb-rate-ms or ble-rate-ms depending on the active ZMK endpoint.
+
+config PMW3610_RATE_CYCLE_GPIO
+    bool "PMW3610 hardware rate-cycle GPIO button"
+    default n
+    help
+      Enable a dedicated GPIO that cycles the PMW3610 hardware run rate on
+      each press (50 ms debounce). Configure rate-cycle-gpios and
+      rate-cycle-rates-ms in the sensor DTS node. First entry is the boot rate.
 config PMW3610_INIT_FAILURE_THRESHOLD
     int "Number of failed initialization attempts before triggering error"
     default 3

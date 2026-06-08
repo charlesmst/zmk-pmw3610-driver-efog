@@ -14,6 +14,12 @@
 #include <zmk/events/activity_state_changed.h>
 #include "pmw3610.h"
 
+#if IS_ENABLED(CONFIG_PMW3610_ENDPOINT_RATE_NOTIFY)
+#include <zmk/endpoints.h>
+#include <zmk/endpoints_types.h>
+#include <zmk/events/endpoint_changed.h>
+#endif
+
 #if IS_ENABLED(CONFIG_ZMK_ADAPTIVE_FEEDBACK)
 #include <zmk_adaptive_feedback/adaptive_feedback.h>
 #endif
@@ -241,6 +247,15 @@ static int pmw3610_set_downshift_time(const struct device *dev, const uint8_t re
     return err;
 }
 
+static uint8_t pmw3610_ms_to_perf(int32_t rate_ms) {
+    switch (rate_ms) {
+    case 2:  return 0x0E; /* POSLO=2ms (500 Hz), VEL/POSHI=4ms */
+    case 4:  return 0x0D; /* all 4ms → 250 Hz */
+    case 8:  /* fall through */
+    default: return 0x00; /* all 8ms → 125 Hz */
+    }
+}
+
 static int pmw3610_set_performance(const struct device *dev, const bool enabled) {
     const struct pixart_config *config = dev->config;
     int err = 0;
@@ -254,21 +269,10 @@ static int pmw3610_set_performance(const struct device *dev, const bool enabled)
         }
         LOG_DBG("Get performance register (reg value 0x%x)", value);
 
-        // Set prefered RUN RATE        
-        //   BIT 3:   VEL_RUNRATE    0x0: 8ms; 0x1 4ms;
-        //   BIT 2:   POSHI_RUN_RATE 0x0: 8ms; 0x1 4ms;
-        //   BIT 1-0: POSLO_RUN_RATE 0x0: 8ms; 0x1 4ms; 0x2 2ms; 0x4 Reserved
-        uint8_t perf = 0;
-        if (config->force_high_performance) {
-            perf = enabled
-                ? 0x0e // RUN RATE @ 4/2ms
-                : 0x00;// RUN RATE @ 8ms
-        } else {
-            perf = 0;
-        }
+        struct pixart_data *data = dev->data;
+        uint8_t perf = enabled ? data->active_perf : 0x00;
 
         if (perf != value) {
-            struct pixart_data *data = dev->data;
             data->data_index = 0;
             data->data_ready = false;
 
@@ -610,6 +614,73 @@ static int pmw3610_init_irq(const struct device *dev) {
     return err;
 }
 
+#if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
+static void pmw3610_rate_cycle_work_cb(struct k_work *work) {
+    struct k_work_delayable *dwork = CONTAINER_OF(work, struct k_work_delayable, work);
+    struct pixart_data *data = CONTAINER_OF(dwork, struct pixart_data, rate_cycle_work);
+    const struct device *dev = data->dev;
+    const struct pixart_config *config = dev->config;
+
+    data->rate_cycle_idx = (data->rate_cycle_idx + 1) % config->rate_cycle_rates_count;
+    int32_t rate_ms = config->rate_cycle_rates_ms[data->rate_cycle_idx];
+    data->active_perf = pmw3610_ms_to_perf(rate_ms);
+    LOG_INF("PMW3610 run rate → %d ms (PERF=0x%02x)", rate_ms, data->active_perf);
+
+    if (data->ready) {
+        pmw3610_set_performance(dev, true);
+    }
+
+    gpio_pin_interrupt_configure_dt(&config->rate_cycle_gpio, GPIO_INT_EDGE_TO_ACTIVE);
+}
+
+static void pmw3610_rate_cycle_gpio_cb(const struct device *port, struct gpio_callback *cb,
+                                       uint32_t pins) {
+    struct pixart_data *data = CONTAINER_OF(cb, struct pixart_data, rate_cycle_gpio_cb);
+    const struct pixart_config *config = data->dev->config;
+
+    gpio_pin_interrupt_configure_dt(&config->rate_cycle_gpio, GPIO_INT_DISABLE);
+    k_work_schedule(&data->rate_cycle_work, K_MSEC(50));
+}
+
+static int pmw3610_init_rate_cycle_gpio(const struct device *dev) {
+    struct pixart_data *data = dev->data;
+    const struct pixart_config *config = dev->config;
+
+    if (!device_is_ready(config->rate_cycle_gpio.port)) {
+        LOG_ERR("Rate-cycle GPIO device not ready");
+        return -ENODEV;
+    }
+
+    int err = gpio_pin_configure_dt(&config->rate_cycle_gpio, GPIO_INPUT);
+    if (err) {
+        LOG_ERR("Cannot configure rate-cycle GPIO: %d", err);
+        return err;
+    }
+
+    gpio_init_callback(&data->rate_cycle_gpio_cb, pmw3610_rate_cycle_gpio_cb,
+                       BIT(config->rate_cycle_gpio.pin));
+    err = gpio_add_callback(config->rate_cycle_gpio.port, &data->rate_cycle_gpio_cb);
+    if (err) {
+        LOG_ERR("Cannot add rate-cycle GPIO callback: %d", err);
+        return err;
+    }
+
+    k_work_init_delayable(&data->rate_cycle_work, pmw3610_rate_cycle_work_cb);
+
+    err = gpio_pin_interrupt_configure_dt(&config->rate_cycle_gpio, GPIO_INT_EDGE_TO_ACTIVE);
+    if (err) {
+        LOG_ERR("Cannot configure rate-cycle GPIO interrupt: %d", err);
+        return err;
+    }
+
+    data->rate_cycle_idx = 0;
+    data->active_perf = pmw3610_ms_to_perf(config->rate_cycle_rates_ms[0]);
+    LOG_INF("PMW3610 rate-cycle GPIO init: boot rate %d ms (PERF=0x%02x)",
+            config->rate_cycle_rates_ms[0], data->active_perf);
+    return 0;
+}
+#endif /* CONFIG_PMW3610_RATE_CYCLE_GPIO */
+
 static int pmw3610_init(const struct device *dev) {
     struct pixart_data *data = dev->data;
     const struct pixart_config *config = dev->config;
@@ -626,14 +697,30 @@ static int pmw3610_init(const struct device *dev) {
     data->init_retry_attempts = config->init_retry_count;
     data->dx = data->dy = 0;
 
+    // init active_perf based on rate config
+#if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
+    data->active_perf = 0x00; // overridden in pmw3610_init_rate_cycle_gpio
+#elif defined(CONFIG_PMW3610_OUTPUT_RATE_NOTIFY)
+    data->active_perf = pmw3610_ms_to_perf(config->usb_rate_ms);
+#else
+    data->active_perf = config->force_high_performance ? 0x0E : 0x00;
+#endif
+
     // init trigger handler work
     k_work_init(&data->trigger_work, pmw3610_work_callback);
 
     // init irq routine
-    const int err = pmw3610_init_irq(dev);
+    int err = pmw3610_init_irq(dev);
     if (err) {
         return err;
     }
+
+#if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
+    err = pmw3610_init_rate_cycle_gpio(dev);
+    if (err) {
+        return err;
+    }
+#endif
 
     if (config->enable_pm_support && !config->rst_gpio.port) {
         LOG_ERR("PM support requested but RST GPIO not defined.");
@@ -736,7 +823,28 @@ static int pmw3610_pm_action(const struct device *dev, const enum pm_device_acti
 #define PMW3610_SPI_MODE (SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_MODE_CPOL | \
                         SPI_MODE_CPHA | SPI_TRANSFER_MSB)
 
+#if defined(CONFIG_PMW3610_OUTPUT_RATE_NOTIFY)
+#define PMW3610_OUTPUT_RATE_CFG(n) \
+        .usb_rate_ms = DT_INST_PROP_OR(n, usb_rate_ms, 2), \
+        .ble_rate_ms = DT_INST_PROP_OR(n, ble_rate_ms, 8),
+#else
+#define PMW3610_OUTPUT_RATE_CFG(n)
+#endif
+
+#if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
+#define PMW3610_RATE_CYCLE_RATES(n) \
+    static const int32_t rate_cycle_rates_##n[] = DT_INST_PROP(n, rate_cycle_rates_ms);
+#define PMW3610_RATE_CYCLE_CFG(n) \
+        .rate_cycle_gpio = GPIO_DT_SPEC_INST_GET(n, rate_cycle_gpios), \
+        .rate_cycle_rates_ms = rate_cycle_rates_##n, \
+        .rate_cycle_rates_count = ARRAY_SIZE(rate_cycle_rates_##n),
+#else
+#define PMW3610_RATE_CYCLE_RATES(n)
+#define PMW3610_RATE_CYCLE_CFG(n)
+#endif
+
 #define PMW3610_DEFINE(n)                                                                               \
+    PMW3610_RATE_CYCLE_RATES(n)                                                                         \
     static struct pixart_data data##n;                                                                  \
     static const struct pixart_config config##n = {                                                     \
         .id = n,                                                                                        \
@@ -755,6 +863,8 @@ static int pmw3610_pm_action(const struct device *dev, const enum pm_device_acti
         .enable_pm_support = DT_PROP(DT_DRV_INST(n), enable_pm_support),                                \
         .init_retry_count = DT_PROP(DT_DRV_INST(n), init_retry_count),                                  \
         .init_retry_interval = DT_PROP(DT_DRV_INST(n), init_retry_interval),                            \
+        PMW3610_OUTPUT_RATE_CFG(n)                                                                      \
+        PMW3610_RATE_CYCLE_CFG(n)                                                                       \
     };                                                                                                  \
     PM_DEVICE_DT_INST_DEFINE(n, pmw3610_pm_action);                                                     \
     DEVICE_DT_INST_DEFINE(n, pmw3610_init, PM_DEVICE_DT_INST_GET(n), &data##n, &config##n, POST_KERNEL, \
@@ -776,6 +886,37 @@ static int pmw3610_shutdown(const struct device *dev) {
 
     return pmw3610_write_reg(dev, PMW3610_REG_SHUTDOWN, PMW3610_REG_SHUTDOWN_CMD);
 }
+
+#if IS_ENABLED(CONFIG_PMW3610_ENDPOINT_RATE_NOTIFY)
+static int pmw3610_on_endpoint_changed(const zmk_event_t *eh) {
+    const struct zmk_endpoint_changed *ev = as_zmk_endpoint_changed(eh);
+
+    if (ev == NULL) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    for (size_t i = 0; i < ARRAY_SIZE(pmw3610_devs); i++) {
+        const struct pixart_config *config = pmw3610_devs[i]->config;
+        struct pixart_data *data = pmw3610_devs[i]->data;
+        const int32_t rate_ms = ev->endpoint.transport == ZMK_TRANSPORT_USB
+                                    ? config->usb_rate_ms
+                                    : config->ble_rate_ms;
+
+        data->active_perf = pmw3610_ms_to_perf(rate_ms);
+        LOG_INF("PMW3610 endpoint transport=%d rate=%dms PERF=0x%02x",
+                ev->endpoint.transport, rate_ms, data->active_perf);
+
+        if (data->ready) {
+            pmw3610_set_performance(pmw3610_devs[i], true);
+        }
+    }
+
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(zmk_pmw3610_endpoint_rate, pmw3610_on_endpoint_changed);
+ZMK_SUBSCRIPTION(zmk_pmw3610_endpoint_rate, zmk_endpoint_changed);
+#endif /* CONFIG_PMW3610_ENDPOINT_RATE_NOTIFY */
 
 static uint8_t prev_state = 0;
 static int on_activity_state(const zmk_event_t *eh) {

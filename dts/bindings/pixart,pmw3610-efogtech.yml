@@ -44,3 +44,19 @@ properties:
     type: int
     default: 100
     description: "Interval between initialization retries in milliseconds"
+  usb-rate-ms:
+    type: int
+    description: |
+      PERFORMANCE register run-rate (ms) used when USB is active.
+      2 = ~500 Hz, 4 = 250 Hz, 8 = 125 Hz.
+  ble-rate-ms:
+    type: int
+    description: |
+      PERFORMANCE register run-rate (ms) used when BLE is active.
+      2 = ~500 Hz, 4 = 250 Hz, 8 = 125 Hz.
+  rate-cycle-gpios:
+    type: phandle-array
+    description: Optional GPIO for a hardware rate-cycle button (cycles report interval locally).
+  rate-cycle-rates-ms:
+    type: array
+    description: Ordered list of report-interval values (ms) to cycle through (e.g. 8 4 2).

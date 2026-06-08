@@ -18,29 +18,36 @@ extern "C" {
 /* device data structure */
 struct pixart_data {
     const struct device          *dev;
-    bool                         sw_smart_flag; // for pmw3610 smart algorithm
+    bool                         sw_smart_flag;
 
-    struct gpio_callback         irq_gpio_cb; // motion pin irq callback
-    struct k_work                trigger_work; // realtrigger job
+    struct gpio_callback         irq_gpio_cb;
+    struct k_work                trigger_work;
 
-    struct k_work_delayable      init_work; // the work structure for delayable init steps
+    struct k_work_delayable      init_work;
     int                          async_init_step;
-    int                          init_retry_count; // current retry count
-    int                          init_retry_attempts; // remaining retry attempts
+    int                          init_retry_count;
+    int                          init_retry_attempts;
 
-    bool                         ready, error_triggered;
-    int                          err; // error code during async init
+    bool                         ready;
+    int                          err;
 
     bool                         data_ready;
     uint8_t                      data_index;
     int64_t                      dx, dy;
+
+    uint8_t                      active_perf;
+
+#if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
+    struct gpio_callback         rate_cycle_gpio_cb;
+    struct k_work_delayable      rate_cycle_work;
+    uint8_t                      rate_cycle_idx;
+#endif
 
 #if IS_ENABLED(CONFIG_PMW3610_IGNORE_AFTER_REST) || IS_ENABLED(CONFIG_PMW3610_ANTI_WARP)
     uint64_t                     last_data;
 #endif
 };
 
-// device config data structure
 struct pixart_config {
     uint8_t id;
 	struct spi_dt_spec spi;
@@ -58,12 +65,19 @@ struct pixart_config {
     bool enable_pm_support;
     uint8_t init_retry_count;
     uint16_t init_retry_interval;
+
+#if defined(CONFIG_PMW3610_OUTPUT_RATE_NOTIFY)
+    int32_t usb_rate_ms;
+    int32_t ble_rate_ms;
+#endif
+
+#if defined(CONFIG_PMW3610_RATE_CYCLE_GPIO)
+    struct gpio_dt_spec rate_cycle_gpio;
+    const int32_t *rate_cycle_rates_ms;
+    size_t rate_cycle_rates_count;
+#endif
 };
 
 #ifdef __cplusplus
 }
 #endif
-
-/**
- * @}
- */
